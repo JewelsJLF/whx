@@ -79,6 +79,22 @@ def _create_database(path: Path) -> None:
         )
 
 
+def _write_import_csv(path: Path, rows: list[list[str]]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(
+            [
+                "Job",
+                "Clocked In",
+                "Clocked Out",
+                "Duration",
+                "Hourly Rate",
+                "TotalEarningsAdjustment",
+            ]
+        )
+        writer.writerows(rows)
+
+
 def test_import_preserves_existing_database_and_creates_lump_sum_bonuses(
     tmp_path: Path,
 ) -> None:
@@ -186,6 +202,92 @@ def test_bonus_projects_group_by_amount_and_use_chronological_names(
         ("Example Job B.2", 3.0),
     ]
     assert bonus_units == (2,)
+
+
+def test_subset_reimport_resolves_the_existing_project_before_duplicate_check(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "all-jobs.csv"
+    example_job = [
+        "Example Job",
+        "01/15/24 8:00 AM",
+        "01/15/24 9:00 AM",
+        "1",
+        "25",
+        "",
+    ]
+    _write_import_csv(
+        source,
+        [
+            example_job,
+            ["Other Job", "01/14/24 8:00 AM", "01/14/24 9:00 AM", "1", "40", ""],
+        ],
+    )
+    database = tmp_path / "WorkingHours.db"
+    _create_database(database)
+    first_import = import_hourstracker_csv(source, database)
+
+    subset = tmp_path / "subset.csv"
+    _write_import_csv(subset, [example_job])
+    with pytest.raises(ValueError, match="matches an existing or duplicate"):
+        import_hourstracker_csv(subset, first_import.database_path)
+
+    with sqlite3.connect(first_import.database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM Projects").fetchone() == (3,)
+        assert connection.execute("SELECT COUNT(*) FROM WorkUnits").fetchone() == (2,)
+    assert not (tmp_path / "WorkingHours-imported-imported.db").exists()
+
+
+def test_successive_imports_preserve_project_and_bonus_assignments(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "WorkingHours.db"
+    _create_database(database)
+    first_source = tmp_path / "first.csv"
+    _write_import_csv(
+        first_source,
+        [
+            ["Example Job", "01/14/24 8:00 AM", "01/14/24 9:00 AM", "1", "25", "5"],
+            ["Other Job", "01/15/24 8:00 AM", "01/15/24 9:00 AM", "1", "40", ""],
+        ],
+    )
+    first_import = import_hourstracker_csv(first_source, database)
+
+    second_source = tmp_path / "second.csv"
+    _write_import_csv(
+        second_source,
+        [
+            ["Example Job", "01/13/24 8:00 AM", "01/13/24 9:00 AM", "1", "25", "2"],
+            ["Example Job", "01/16/24 8:00 AM", "01/16/24 9:00 AM", "1", "25", "10"],
+        ],
+    )
+    second_import = import_hourstracker_csv(second_source, first_import.database_path)
+
+    third_source = tmp_path / "third.csv"
+    _write_import_csv(
+        third_source,
+        [["Example Job", "01/17/24 8:00 AM", "01/17/24 9:00 AM", "1", "30", ""]],
+    )
+    third_import = import_hourstracker_csv(third_source, second_import.database_path)
+
+    with sqlite3.connect(third_import.database_path) as connection:
+        regular_projects = connection.execute(
+            "SELECT Name, HourlyRate FROM Projects WHERE IsLumpSum = 0 ORDER BY Name"
+        ).fetchall()
+        bonus_projects = connection.execute(
+            "SELECT Name, HourlyRate FROM Projects WHERE IsLumpSum = 1 ORDER BY Name"
+        ).fetchall()
+    assert set(regular_projects) == {
+        ("Default", 0.0),
+        ("Example Job A", 25.0),
+        ("Other Job B", 40.0),
+        ("Example Job C", 30.0),
+    }
+    assert bonus_projects == [
+        ("Example Job A.1", 5.0),
+        ("Example Job A.2", 2.0),
+        ("Example Job A.3", 10.0),
+    ]
 
 
 def test_import_is_atomic_and_refuses_duplicate_work_units(tmp_path: Path) -> None:
@@ -387,7 +489,7 @@ def test_import_rolls_back_when_a_bonus_project_conflicts(tmp_path: Path) -> Non
             "INSERT INTO Projects "
             "(Name, Color, HourlyRate, Currency, Details, SortIndex, Hidden, "
             "IsLumpSum) "
-            "VALUES (?, '#FF607D8B', 999, '$', '', 1, 0, 1)",
+            "VALUES (?, '#FF607D8B', 2, 'EUR', '', 1, 0, 1)",
             ("Example Job A.2",),
         )
 

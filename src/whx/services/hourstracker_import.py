@@ -117,10 +117,6 @@ def import_hourstracker_csv(source: Path, database: Path) -> ImportSummary:
         raise ValueError("CSV source and database destination must be different files.")
     records = read_hourstracker_csv(source)
     entries = _parse_entries(records)
-    project_names = _project_names_by_job_and_rate(entries)
-    bonus_project_names = _bonus_project_names_by_job_rate_and_amount(
-        entries, project_names
-    )
     source_only_fields = _source_only_field_counts(records)
     mileage_values_ignored = sum(
         bool((row.get("TotalMileage", "") or "").strip()) for row in records.rows
@@ -132,6 +128,10 @@ def import_hourstracker_csv(source: Path, database: Path) -> ImportSummary:
         with connection:
             connection.execute("BEGIN IMMEDIATE")
             default_currency = _default_project_currency(connection)
+            project_names = _project_names_by_job_and_rate(entries, connection)
+            bonus_project_names = _bonus_project_names_by_job_rate_and_amount(
+                entries, project_names, connection
+            )
             next_project_sort = _next_sort_index(connection, "Projects")
             next_tag_sort = _next_sort_index(connection, "Tags")
             tag_cache: dict[str, int] = {}
@@ -416,6 +416,7 @@ def _next_sort_index(connection: sqlite3.Connection, table: str) -> int:
 
 def _project_names_by_job_and_rate(
     entries: tuple[_Entry, ...],
+    connection: sqlite3.Connection,
 ) -> dict[tuple[str, Decimal], str]:
     first_occurrences: dict[tuple[str, Decimal], tuple[int, int]] = {}
     for entry in entries:
@@ -424,11 +425,57 @@ def _project_names_by_job_and_rate(
         if key not in first_occurrences or occurrence < first_occurrences[key]:
             first_occurrences[key] = occurrence
 
+    projects = connection.execute(
+        "SELECT Name, HourlyRate, IsLumpSum FROM Projects"
+    ).fetchall()
     project_names: dict[tuple[str, Decimal], str] = {}
+    used_suffixes = set()
+    for name, _, _ in projects:
+        existing_suffix = _alphabetic_suffix_index(str(name).rsplit(" ", 1)[-1])
+        if existing_suffix is not None:
+            used_suffixes.add(existing_suffix)
+    for job, rate in first_occurrences:
+        candidates = [
+            str(name)
+            for name, stored_rate, is_lump_sum in projects
+            if not is_lump_sum
+            and Decimal(str(stored_rate)) == rate
+            and str(name).startswith(f"{job} ")
+            and _alphabetic_suffix_index(str(name)[len(job) + 1 :]) is not None
+        ]
+        if len(candidates) > 1:
+            raise ValueError(
+                f"Database has multiple projects matching job {job!r} at rate "
+                f"{rate}; no import was committed."
+            )
+        if candidates:
+            project_names[(job, rate)] = candidates[0]
+
+    next_suffix = 0
     keys = sorted(first_occurrences, key=first_occurrences.__getitem__)
-    for index, (job, rate) in enumerate(keys):
-        project_names[(job, rate)] = f"{job} {_alphabetic_suffix(index)}"
+    existing_names = {str(name) for name, _, _ in projects}
+    for job, rate in keys:
+        if (job, rate) in project_names:
+            continue
+        while (
+            next_suffix in used_suffixes
+            or f"{job} {_alphabetic_suffix(next_suffix)}" in existing_names
+        ):
+            next_suffix += 1
+        new_suffix = _alphabetic_suffix(next_suffix)
+        project_names[(job, rate)] = f"{job} {new_suffix}"
+        used_suffixes.add(next_suffix)
+        next_suffix += 1
     return project_names
+
+
+def _alphabetic_suffix_index(suffix: str) -> int | None:
+    if not suffix or any(character < "A" or character > "Z" for character in suffix):
+        return None
+    number = 0
+    for character in suffix:
+        number = number * 26 + ord(character) - ord("A") + 1
+    return number - 1
 
 
 def _alphabetic_suffix(index: int) -> str:
@@ -443,6 +490,7 @@ def _alphabetic_suffix(index: int) -> str:
 def _bonus_project_names_by_job_rate_and_amount(
     entries: tuple[_Entry, ...],
     project_names: dict[tuple[str, Decimal], str],
+    connection: sqlite3.Connection,
 ) -> dict[tuple[str, Decimal, Decimal], str]:
     first_occurrences: dict[tuple[str, Decimal, Decimal], tuple[int, int]] = {}
     for entry in entries:
@@ -459,12 +507,57 @@ def _bonus_project_names_by_job_rate_and_amount(
             (job, rate, amount)
         )
 
+    projects = connection.execute(
+        "SELECT Name, HourlyRate, IsLumpSum FROM Projects"
+    ).fetchall()
     bonus_names: dict[tuple[str, Decimal, Decimal], str] = {}
     for project_name, keys in keys_by_project.items():
         keys.sort(key=first_occurrences.__getitem__)
-        for index, key in enumerate(keys, start=1):
-            bonus_names[key] = f"{project_name}.{index}"
+        used_suffixes = set()
+        for name, _, _ in projects:
+            existing_suffix = _numeric_suffix(str(name), f"{project_name}.")
+            if existing_suffix is not None:
+                used_suffixes.add(existing_suffix)
+        existing_names = {str(name) for name, _, _ in projects}
+        for job, rate, amount in keys:
+            candidates = [
+                str(name)
+                for name, stored_rate, is_lump_sum in projects
+                if is_lump_sum
+                and Decimal(str(stored_rate)) == amount
+                and _numeric_suffix(str(name), f"{project_name}.") is not None
+            ]
+            if len(candidates) > 1:
+                raise ValueError(
+                    f"Database has multiple bonus projects matching {project_name!r} "
+                    f"at amount {amount}; no import was committed."
+                )
+            if candidates:
+                bonus_names[(job, rate, amount)] = candidates[0]
+
+        next_suffix = 1
+        for job, rate, amount in keys:
+            key = (job, rate, amount)
+            if key in bonus_names:
+                continue
+            while (
+                next_suffix in used_suffixes
+                or f"{project_name}.{next_suffix}" in existing_names
+            ):
+                next_suffix += 1
+            bonus_names[key] = f"{project_name}.{next_suffix}"
+            used_suffixes.add(next_suffix)
+            next_suffix += 1
     return bonus_names
+
+
+def _numeric_suffix(name: str, prefix: str) -> int | None:
+    if not name.startswith(prefix):
+        return None
+    suffix = name[len(prefix) :]
+    if not suffix.isdecimal() or int(suffix) < 1:
+        return None
+    return int(suffix)
 
 
 def _get_or_create_project(
