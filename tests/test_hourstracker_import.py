@@ -433,6 +433,35 @@ def test_import_rejects_negative_earnings_adjustment(tmp_path: Path) -> None:
         assert connection.execute("SELECT COUNT(*) FROM WorkUnits").fetchone() == (0,)
 
 
+@pytest.mark.parametrize(
+    ("rate", "adjustment"),
+    [
+        ("25.1234567890123456789", ""),
+        ("25", "5.1234567890123456789"),
+    ],
+)
+def test_import_rejects_values_beyond_sqlite_real_precision(
+    tmp_path: Path, rate: str, adjustment: str
+) -> None:
+    source = tmp_path / "precision.csv"
+    _write_import_csv(
+        source,
+        [["Example Job", "01/15/24 8:00 AM", "01/15/24 9:00 AM", "1", rate, adjustment]],
+    )
+    database = tmp_path / "WorkingHours.db"
+    _create_database(database)
+
+    with pytest.raises(
+        ValueError, match="cannot be represented exactly as SQLite REAL"
+    ):
+        import_hourstracker_csv(source, database)
+
+    assert not (tmp_path / "WorkingHours-imported.db").exists()
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM Projects").fetchone() == (1,)
+        assert connection.execute("SELECT COUNT(*) FROM WorkUnits").fetchone() == (0,)
+
+
 def test_import_names_projects_in_global_chronological_order(tmp_path: Path) -> None:
     source = tmp_path / "rates.csv"
     with source.open("w", encoding="utf-8", newline="") as csv_file:

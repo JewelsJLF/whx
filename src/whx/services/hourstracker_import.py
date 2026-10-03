@@ -320,6 +320,18 @@ def _decimal_value(
         ) from error
     if not number.is_finite():
         raise ValueError(f"CSV record {row_number} has a non-finite {field}.")
+    try:
+        sqlite_number = float(number)
+    except OverflowError as error:
+        raise ValueError(
+            f"CSV record {row_number} has a {field} value that cannot be "
+            "represented exactly as SQLite REAL."
+        ) from error
+    if not math.isfinite(sqlite_number) or Decimal(str(sqlite_number)) != number:
+        raise ValueError(
+            f"CSV record {row_number} has a {field} value that cannot be "
+            "represented exactly as SQLite REAL."
+        )
     return number
 
 
