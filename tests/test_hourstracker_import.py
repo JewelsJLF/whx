@@ -11,6 +11,7 @@ from click.testing import CliRunner
 
 from whx.cli import cli
 from whx.services.colors import tag_colors, task_colors
+from whx.services.hourstracker_csv import convert_time_fields
 from whx.services.hourstracker_import import import_hourstracker_csv
 from whx.services.migration import migrate_csv
 
@@ -288,6 +289,40 @@ def test_successive_imports_preserve_project_and_bonus_assignments(
         ("Example Job A.2", 2.0),
         ("Example Job A.3", 10.0),
     ]
+
+
+def test_import_rejects_a_legacy_rate_specific_project(tmp_path: Path) -> None:
+    source = tmp_path / "legacy-reimport.csv"
+    row = ["Example Job", "01/15/24 8:00 AM", "01/15/24 9:00 AM", "1", "25", ""]
+    _write_import_csv(source, [row])
+    database = tmp_path / "WorkingHours.db"
+    _create_database(database)
+    times = convert_time_fields(row[1], row[2], row[3])
+    with sqlite3.connect(database) as connection:
+        cursor = connection.execute(
+            "INSERT INTO Projects "
+            "(Name, Color, HourlyRate, Currency, Details, SortIndex, Hidden, "
+            "IsLumpSum) VALUES (?, ?, ?, ?, '', 1, 0, 0)",
+            ("Example Job (25/h)", "#FF000000", 25, "$"),
+        )
+        connection.execute(
+            "INSERT INTO WorkUnits "
+            "(ProjectId, Duration, End, Description, Details, Start) "
+            "VALUES (?, ?, ?, '', '', ?)",
+            (
+                cursor.lastrowid,
+                times.duration_ticks,
+                times.end_ticks,
+                times.start_ticks,
+            ),
+        )
+    original_database = database.read_bytes()
+
+    with pytest.raises(ValueError, match="legacy project 'Example Job \\(25/h\\)'"):
+        import_hourstracker_csv(source, database)
+
+    assert database.read_bytes() == original_database
+    assert not (tmp_path / "WorkingHours-imported.db").exists()
 
 
 def test_import_is_atomic_and_refuses_duplicate_work_units(tmp_path: Path) -> None:

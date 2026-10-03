@@ -435,6 +435,27 @@ def _project_names_by_job_and_rate(
         if existing_suffix is not None:
             used_suffixes.add(existing_suffix)
     for job, rate in first_occurrences:
+        legacy_prefix = f"{job} ("
+        for name, _, _ in projects:
+            legacy_name = str(name)
+            if not legacy_name.startswith(legacy_prefix):
+                continue
+            legacy_rate, separator, _ = legacy_name[len(legacy_prefix) :].partition(
+                "/h)"
+            )
+            if not separator:
+                continue
+            try:
+                matches_rate = Decimal(legacy_rate) == rate
+            except InvalidOperation:
+                continue
+            if matches_rate:
+                raise ValueError(
+                    f"Database contains legacy project {legacy_name!r} for job "
+                    f"{job!r} at rate {rate}; refusing to import because its "
+                    "existing work units cannot be matched safely."
+                )
+
         candidates = [
             str(name)
             for name, stored_rate, is_lump_sum in projects
