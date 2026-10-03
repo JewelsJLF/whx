@@ -107,6 +107,10 @@ def test_import_preserves_existing_database_and_creates_lump_sum_bonuses(
         ).fetchall()
         assert projects[0] == ("Default", 0.0, "$", 0, "#FF607D8B")
         assert ("Example Job A", 25.0, "$", 0) == projects[1][:4]
+        assert {(project[0], project[1]) for project in projects if project[3]} == {
+            ("Example Job A.1", 5.0),
+            ("Example Job A.2", 2.0),
+        }
         assert sum(bool(project[3]) for project in projects) == 2
         imported_colors = [project[4] for project in projects[1:]]
         assert len(set(imported_colors)) == len(imported_colors)
@@ -128,6 +132,60 @@ def test_import_preserves_existing_database_and_creates_lump_sum_bonuses(
         assert len(bonus_units) == 2
         assert all(row[0] == 0 and row[1] == row[2] for row in bonus_units)
         assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+
+def test_bonus_projects_group_by_amount_and_use_chronological_names(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "bonuses.csv"
+    with source.open("w", encoding="utf-8", newline="") as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(
+            [
+                "Job",
+                "Clocked In",
+                "Clocked Out",
+                "Duration",
+                "Hourly Rate",
+                "TotalEarningsAdjustment",
+            ]
+        )
+        writer.writerow(
+            ["Example Job", "01/17/24 8:00 AM", "01/17/24 9:00 AM", "1", "25", "10"]
+        )
+        writer.writerow(
+            ["Example Job", "01/15/24 8:00 AM", "01/15/24 9:00 AM", "1", "25", "5"]
+        )
+        writer.writerow(
+            ["Example Job", "01/18/24 8:00 AM", "01/18/24 9:00 AM", "1", "25", "10"]
+        )
+        writer.writerow(
+            ["Example Job", "01/16/24 8:00 AM", "01/16/24 9:00 AM", "1", "30", "7"]
+        )
+        writer.writerow(
+            ["Example Job", "01/19/24 8:00 AM", "01/19/24 9:00 AM", "1", "30", "3"]
+        )
+    database = tmp_path / "WorkingHours.db"
+    _create_database(database)
+
+    summary = import_hourstracker_csv(source, database)
+
+    assert summary.bonus_work_units_added == 5
+    with sqlite3.connect(summary.database_path) as connection:
+        bonus_projects = connection.execute(
+            "SELECT Name, HourlyRate FROM Projects WHERE IsLumpSum = 1 ORDER BY Name"
+        ).fetchall()
+        bonus_units = connection.execute(
+            "SELECT COUNT(*) FROM WorkUnits JOIN Projects USING (ProjectId) "
+            "WHERE Projects.Name = 'Example Job A.2'"
+        ).fetchone()
+    assert bonus_projects == [
+        ("Example Job A.1", 5.0),
+        ("Example Job A.2", 10.0),
+        ("Example Job B.1", 7.0),
+        ("Example Job B.2", 3.0),
+    ]
+    assert bonus_units == (2,)
 
 
 def test_import_is_atomic_and_refuses_duplicate_work_units(tmp_path: Path) -> None:
@@ -238,7 +296,7 @@ def test_import_rejects_negative_earnings_adjustment(tmp_path: Path) -> None:
         assert connection.execute("SELECT COUNT(*) FROM WorkUnits").fetchone() == (0,)
 
 
-def test_import_names_rate_projects_in_chronological_order(tmp_path: Path) -> None:
+def test_import_names_projects_in_global_chronological_order(tmp_path: Path) -> None:
     source = tmp_path / "rates.csv"
     with source.open("w", encoding="utf-8", newline="") as csv_file:
         writer = csv.writer(csv_file)
@@ -249,22 +307,26 @@ def test_import_names_rate_projects_in_chronological_order(tmp_path: Path) -> No
         writer.writerow(
             ["Example Job", "01/15/24 8:00 AM", "01/15/24 9:00 AM", "1", "25"]
         )
+        writer.writerow(
+            ["Other Job", "01/14/24 8:00 AM", "01/14/24 9:00 AM", "1", "40"]
+        )
     database = tmp_path / "WorkingHours.db"
     _create_database(database)
 
     summary = import_hourstracker_csv(source, database)
 
-    assert summary.work_units_added == 2
+    assert summary.work_units_added == 3
     with sqlite3.connect(summary.database_path) as connection:
         projects = connection.execute(
             "SELECT Name, HourlyRate, Color FROM Projects WHERE ProjectId != 1"
         ).fetchall()
     assert {(name, rate) for name, rate, _ in projects} == {
-        ("Example Job A", 25.0),
-        ("Example Job B", 30.0),
+        ("Other Job A", 40.0),
+        ("Example Job B", 25.0),
+        ("Example Job C", 30.0),
     }
     colors = [color for _, _, color in projects]
-    assert len(set(colors)) == 2
+    assert len(set(colors)) == 3
 
 
 def test_import_task_colors_avoid_existing_projects_case_insensitively(
@@ -326,7 +388,7 @@ def test_import_rolls_back_when_a_bonus_project_conflicts(tmp_path: Path) -> Non
             "(Name, Color, HourlyRate, Currency, Details, SortIndex, Hidden, "
             "IsLumpSum) "
             "VALUES (?, '#FF607D8B', 999, '$', '', 1, 0, 1)",
-            ("Example Job bonus 2 (CSV row 5)",),
+            ("Example Job A.2",),
         )
 
     with pytest.raises(ValueError, match="conflicts with the import rate"):

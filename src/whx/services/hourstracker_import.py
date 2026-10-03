@@ -118,6 +118,9 @@ def import_hourstracker_csv(source: Path, database: Path) -> ImportSummary:
     records = read_hourstracker_csv(source)
     entries = _parse_entries(records)
     project_names = _project_names_by_job_and_rate(entries)
+    bonus_project_names = _bonus_project_names_by_job_rate_and_amount(
+        entries, project_names
+    )
     source_only_fields = _source_only_field_counts(records)
     mileage_values_ignored = sum(
         bool((row.get("TotalMileage", "") or "").strip()) for row in records.rows
@@ -204,7 +207,9 @@ def import_hourstracker_csv(source: Path, database: Path) -> ImportSummary:
 
                 if entry.earnings_adjustment:
                     bonus_amount = entry.earnings_adjustment
-                    bonus_name = _bonus_project_name(entry)
+                    bonus_name = bonus_project_names[
+                        (entry.job, entry.hourly_rate, bonus_amount)
+                    ]
                     bonus_project, created = _get_or_create_project(
                         connection,
                         bonus_name,
@@ -419,15 +424,10 @@ def _project_names_by_job_and_rate(
         if key not in first_occurrences or occurrence < first_occurrences[key]:
             first_occurrences[key] = occurrence
 
-    keys_by_job: dict[str, list[tuple[str, Decimal]]] = {}
-    for key in first_occurrences:
-        keys_by_job.setdefault(key[0], []).append(key)
-
     project_names: dict[tuple[str, Decimal], str] = {}
-    for job, keys in keys_by_job.items():
-        keys.sort(key=first_occurrences.__getitem__)
-        for index, key in enumerate(keys):
-            project_names[key] = f"{job} {_alphabetic_suffix(index)}"
+    keys = sorted(first_occurrences, key=first_occurrences.__getitem__)
+    for index, (job, rate) in enumerate(keys):
+        project_names[(job, rate)] = f"{job} {_alphabetic_suffix(index)}"
     return project_names
 
 
@@ -440,9 +440,31 @@ def _alphabetic_suffix(index: int) -> str:
     return suffix
 
 
-def _bonus_project_name(entry: _Entry) -> str:
-    amount = format(entry.earnings_adjustment.normalize(), "f")
-    return f"{entry.job} bonus {amount} (CSV row {entry.row_number})"
+def _bonus_project_names_by_job_rate_and_amount(
+    entries: tuple[_Entry, ...],
+    project_names: dict[tuple[str, Decimal], str],
+) -> dict[tuple[str, Decimal, Decimal], str]:
+    first_occurrences: dict[tuple[str, Decimal, Decimal], tuple[int, int]] = {}
+    for entry in entries:
+        if not entry.earnings_adjustment:
+            continue
+        key = (entry.job, entry.hourly_rate, entry.earnings_adjustment)
+        occurrence = (entry.times.start_ticks, entry.row_number)
+        if key not in first_occurrences or occurrence < first_occurrences[key]:
+            first_occurrences[key] = occurrence
+
+    keys_by_project: dict[str, list[tuple[str, Decimal, Decimal]]] = {}
+    for job, rate, amount in first_occurrences:
+        keys_by_project.setdefault(project_names[(job, rate)], []).append(
+            (job, rate, amount)
+        )
+
+    bonus_names: dict[tuple[str, Decimal, Decimal], str] = {}
+    for project_name, keys in keys_by_project.items():
+        keys.sort(key=first_occurrences.__getitem__)
+        for index, key in enumerate(keys, start=1):
+            bonus_names[key] = f"{project_name}.{index}"
+    return bonus_names
 
 
 def _get_or_create_project(
