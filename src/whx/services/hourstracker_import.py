@@ -128,6 +128,10 @@ def import_hourstracker_csv(source: Path, database: Path) -> ImportSummary:
         with connection:
             connection.execute("BEGIN IMMEDIATE")
             default_currency = _default_project_currency(connection)
+            project_names = _project_names_by_job_and_rate(entries, connection)
+            bonus_project_names = _bonus_project_names_by_job_rate_and_amount(
+                entries, project_names, connection
+            )
             next_project_sort = _next_sort_index(connection, "Projects")
             next_tag_sort = _next_sort_index(connection, "Tags")
             tag_cache: dict[str, int] = {}
@@ -151,9 +155,7 @@ def import_hourstracker_csv(source: Path, database: Path) -> ImportSummary:
                 project_key = (entry.job, entry.hourly_rate)
                 project = project_cache.get(project_key)
                 if project is None:
-                    project_name = _rate_specific_project_name(
-                        entry.job, entry.hourly_rate
-                    )
+                    project_name = project_names[project_key]
                     project, created = _get_or_create_project(
                         connection,
                         project_name,
@@ -205,7 +207,9 @@ def import_hourstracker_csv(source: Path, database: Path) -> ImportSummary:
 
                 if entry.earnings_adjustment:
                     bonus_amount = entry.earnings_adjustment
-                    bonus_name = _bonus_project_name(entry)
+                    bonus_name = bonus_project_names[
+                        (entry.job, entry.hourly_rate, bonus_amount)
+                    ]
                     bonus_project, created = _get_or_create_project(
                         connection,
                         bonus_name,
@@ -316,6 +320,18 @@ def _decimal_value(
         ) from error
     if not number.is_finite():
         raise ValueError(f"CSV record {row_number} has a non-finite {field}.")
+    try:
+        sqlite_number = float(number)
+    except OverflowError as error:
+        raise ValueError(
+            f"CSV record {row_number} has a {field} value that cannot be "
+            "represented exactly as SQLite REAL."
+        ) from error
+    if not math.isfinite(sqlite_number) or Decimal(str(sqlite_number)) != number:
+        raise ValueError(
+            f"CSV record {row_number} has a {field} value that cannot be "
+            "represented exactly as SQLite REAL."
+        )
     return number
 
 
@@ -410,14 +426,171 @@ def _next_sort_index(connection: sqlite3.Connection, table: str) -> int:
     return int(value or 0) + 1
 
 
-def _rate_specific_project_name(job: str, hourly_rate: Decimal) -> str:
-    rate = format(hourly_rate.normalize(), "f")
-    return f"{job} ({rate}/h)"
+def _project_names_by_job_and_rate(
+    entries: tuple[_Entry, ...],
+    connection: sqlite3.Connection,
+) -> dict[tuple[str, Decimal], str]:
+    first_occurrences: dict[tuple[str, Decimal], tuple[int, int]] = {}
+    for entry in entries:
+        key = (entry.job, entry.hourly_rate)
+        occurrence = (entry.times.start_ticks, entry.row_number)
+        if key not in first_occurrences or occurrence < first_occurrences[key]:
+            first_occurrences[key] = occurrence
+
+    projects = connection.execute(
+        "SELECT Name, HourlyRate, IsLumpSum FROM Projects"
+    ).fetchall()
+    project_names: dict[tuple[str, Decimal], str] = {}
+    used_suffixes = set()
+    for name, _, _ in projects:
+        existing_suffix = _alphabetic_suffix_index(str(name).rsplit(" ", 1)[-1])
+        if existing_suffix is not None:
+            used_suffixes.add(existing_suffix)
+    for job, rate in first_occurrences:
+        legacy_prefix = f"{job} ("
+        for name, _, _ in projects:
+            legacy_name = str(name)
+            if not legacy_name.startswith(legacy_prefix):
+                continue
+            legacy_rate, separator, remainder = legacy_name[
+                len(legacy_prefix) :
+            ].partition("/h)")
+            if not separator or remainder:
+                continue
+            try:
+                matches_rate = Decimal(legacy_rate) == rate
+            except InvalidOperation:
+                continue
+            if matches_rate:
+                raise ValueError(
+                    f"Database contains legacy project {legacy_name!r} for job "
+                    f"{job!r} at rate {rate}; refusing to import because its "
+                    "existing work units cannot be matched safely."
+                )
+
+        candidates = [
+            str(name)
+            for name, stored_rate, is_lump_sum in projects
+            if not is_lump_sum
+            and Decimal(str(stored_rate)) == rate
+            and str(name).startswith(f"{job} ")
+            and _alphabetic_suffix_index(str(name)[len(job) + 1 :]) is not None
+        ]
+        if len(candidates) > 1:
+            raise ValueError(
+                f"Database has multiple projects matching job {job!r} at rate "
+                f"{rate}; no import was committed."
+            )
+        if candidates:
+            project_names[(job, rate)] = candidates[0]
+
+    next_suffix = 0
+    keys = sorted(first_occurrences, key=first_occurrences.__getitem__)
+    existing_names = {str(name) for name, _, _ in projects}
+    for job, rate in keys:
+        if (job, rate) in project_names:
+            continue
+        while (
+            next_suffix in used_suffixes
+            or f"{job} {_alphabetic_suffix(next_suffix)}" in existing_names
+        ):
+            next_suffix += 1
+        new_suffix = _alphabetic_suffix(next_suffix)
+        project_names[(job, rate)] = f"{job} {new_suffix}"
+        used_suffixes.add(next_suffix)
+        next_suffix += 1
+    return project_names
 
 
-def _bonus_project_name(entry: _Entry) -> str:
-    amount = format(entry.earnings_adjustment.normalize(), "f")
-    return f"{entry.job} bonus {amount} (CSV row {entry.row_number})"
+def _alphabetic_suffix_index(suffix: str) -> int | None:
+    if not suffix or any(character < "A" or character > "Z" for character in suffix):
+        return None
+    number = 0
+    for character in suffix:
+        number = number * 26 + ord(character) - ord("A") + 1
+    return number - 1
+
+
+def _alphabetic_suffix(index: int) -> str:
+    suffix = ""
+    number = index + 1
+    while number:
+        number, remainder = divmod(number - 1, 26)
+        suffix = chr(ord("A") + remainder) + suffix
+    return suffix
+
+
+def _bonus_project_names_by_job_rate_and_amount(
+    entries: tuple[_Entry, ...],
+    project_names: dict[tuple[str, Decimal], str],
+    connection: sqlite3.Connection,
+) -> dict[tuple[str, Decimal, Decimal], str]:
+    first_occurrences: dict[tuple[str, Decimal, Decimal], tuple[int, int]] = {}
+    for entry in entries:
+        if not entry.earnings_adjustment:
+            continue
+        key = (entry.job, entry.hourly_rate, entry.earnings_adjustment)
+        occurrence = (entry.times.start_ticks, entry.row_number)
+        if key not in first_occurrences or occurrence < first_occurrences[key]:
+            first_occurrences[key] = occurrence
+
+    keys_by_project: dict[str, list[tuple[str, Decimal, Decimal]]] = {}
+    for job, rate, amount in first_occurrences:
+        keys_by_project.setdefault(project_names[(job, rate)], []).append(
+            (job, rate, amount)
+        )
+
+    projects = connection.execute(
+        "SELECT Name, HourlyRate, IsLumpSum FROM Projects"
+    ).fetchall()
+    bonus_names: dict[tuple[str, Decimal, Decimal], str] = {}
+    for project_name, keys in keys_by_project.items():
+        keys.sort(key=first_occurrences.__getitem__)
+        used_suffixes = set()
+        for name, _, _ in projects:
+            existing_suffix = _numeric_suffix(str(name), f"{project_name}.")
+            if existing_suffix is not None:
+                used_suffixes.add(existing_suffix)
+        existing_names = {str(name) for name, _, _ in projects}
+        for job, rate, amount in keys:
+            candidates = [
+                str(name)
+                for name, stored_rate, is_lump_sum in projects
+                if is_lump_sum
+                and Decimal(str(stored_rate)) == amount
+                and _numeric_suffix(str(name), f"{project_name}.") is not None
+            ]
+            if len(candidates) > 1:
+                raise ValueError(
+                    f"Database has multiple bonus projects matching {project_name!r} "
+                    f"at amount {amount}; no import was committed."
+                )
+            if candidates:
+                bonus_names[(job, rate, amount)] = candidates[0]
+
+        next_suffix = 1
+        for job, rate, amount in keys:
+            key = (job, rate, amount)
+            if key in bonus_names:
+                continue
+            while (
+                next_suffix in used_suffixes
+                or f"{project_name}.{next_suffix}" in existing_names
+            ):
+                next_suffix += 1
+            bonus_names[key] = f"{project_name}.{next_suffix}"
+            used_suffixes.add(next_suffix)
+            next_suffix += 1
+    return bonus_names
+
+
+def _numeric_suffix(name: str, prefix: str) -> int | None:
+    if not name.startswith(prefix):
+        return None
+    suffix = name[len(prefix) :]
+    if not suffix.isdecimal() or int(suffix) < 1:
+        return None
+    return int(suffix)
 
 
 def _get_or_create_project(
