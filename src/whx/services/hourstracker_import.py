@@ -117,6 +117,7 @@ def import_hourstracker_csv(source: Path, database: Path) -> ImportSummary:
         raise ValueError("CSV source and database destination must be different files.")
     records = read_hourstracker_csv(source)
     entries = _parse_entries(records)
+    project_names = _project_names_by_job_and_rate(entries)
     source_only_fields = _source_only_field_counts(records)
     mileage_values_ignored = sum(
         bool((row.get("TotalMileage", "") or "").strip()) for row in records.rows
@@ -151,9 +152,7 @@ def import_hourstracker_csv(source: Path, database: Path) -> ImportSummary:
                 project_key = (entry.job, entry.hourly_rate)
                 project = project_cache.get(project_key)
                 if project is None:
-                    project_name = _rate_specific_project_name(
-                        entry.job, entry.hourly_rate
-                    )
+                    project_name = project_names[project_key]
                     project, created = _get_or_create_project(
                         connection,
                         project_name,
@@ -410,9 +409,35 @@ def _next_sort_index(connection: sqlite3.Connection, table: str) -> int:
     return int(value or 0) + 1
 
 
-def _rate_specific_project_name(job: str, hourly_rate: Decimal) -> str:
-    rate = format(hourly_rate.normalize(), "f")
-    return f"{job} ({rate}/h)"
+def _project_names_by_job_and_rate(
+    entries: tuple[_Entry, ...],
+) -> dict[tuple[str, Decimal], str]:
+    first_occurrences: dict[tuple[str, Decimal], tuple[int, int]] = {}
+    for entry in entries:
+        key = (entry.job, entry.hourly_rate)
+        occurrence = (entry.times.start_ticks, entry.row_number)
+        if key not in first_occurrences or occurrence < first_occurrences[key]:
+            first_occurrences[key] = occurrence
+
+    keys_by_job: dict[str, list[tuple[str, Decimal]]] = {}
+    for key in first_occurrences:
+        keys_by_job.setdefault(key[0], []).append(key)
+
+    project_names: dict[tuple[str, Decimal], str] = {}
+    for job, keys in keys_by_job.items():
+        keys.sort(key=first_occurrences.__getitem__)
+        for index, key in enumerate(keys):
+            project_names[key] = f"{job} {_alphabetic_suffix(index)}"
+    return project_names
+
+
+def _alphabetic_suffix(index: int) -> str:
+    suffix = ""
+    number = index + 1
+    while number:
+        number, remainder = divmod(number - 1, 26)
+        suffix = chr(ord("A") + remainder) + suffix
+    return suffix
 
 
 def _bonus_project_name(entry: _Entry) -> str:

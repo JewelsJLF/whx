@@ -106,7 +106,7 @@ def test_import_preserves_existing_database_and_creates_lump_sum_bonuses(
             "ORDER BY ProjectId"
         ).fetchall()
         assert projects[0] == ("Default", 0.0, "$", 0, "#FF607D8B")
-        assert ("Example Job (25/h)", 25.0, "$", 0) == projects[1][:4]
+        assert ("Example Job A", 25.0, "$", 0) == projects[1][:4]
         assert sum(bool(project[3]) for project in projects) == 2
         imported_colors = [project[4] for project in projects[1:]]
         assert len(set(imported_colors)) == len(imported_colors)
@@ -238,16 +238,16 @@ def test_import_rejects_negative_earnings_adjustment(tmp_path: Path) -> None:
         assert connection.execute("SELECT COUNT(*) FROM WorkUnits").fetchone() == (0,)
 
 
-def test_import_creates_a_project_for_each_job_and_rate_pair(tmp_path: Path) -> None:
+def test_import_names_rate_projects_in_chronological_order(tmp_path: Path) -> None:
     source = tmp_path / "rates.csv"
     with source.open("w", encoding="utf-8", newline="") as csv_file:
         writer = csv.writer(csv_file)
         writer.writerow(["Job", "Clocked In", "Clocked Out", "Duration", "Hourly Rate"])
         writer.writerow(
-            ["Example Job", "01/15/24 8:00 AM", "01/15/24 9:00 AM", "1", "25"]
+            ["Example Job", "01/16/24 8:00 AM", "01/16/24 9:00 AM", "1", "30"]
         )
         writer.writerow(
-            ["Example Job", "01/16/24 8:00 AM", "01/16/24 9:00 AM", "1", "30"]
+            ["Example Job", "01/15/24 8:00 AM", "01/15/24 9:00 AM", "1", "25"]
         )
     database = tmp_path / "WorkingHours.db"
     _create_database(database)
@@ -257,12 +257,14 @@ def test_import_creates_a_project_for_each_job_and_rate_pair(tmp_path: Path) -> 
     assert summary.work_units_added == 2
     with sqlite3.connect(summary.database_path) as connection:
         projects = connection.execute(
-            "SELECT Name, HourlyRate, Color FROM Projects ORDER BY ProjectId"
+            "SELECT Name, HourlyRate, Color FROM Projects WHERE ProjectId != 1"
         ).fetchall()
-    assert ("Example Job (25/h)", 25.0) == projects[1][:2]
-    assert ("Example Job (30/h)", 30.0) == projects[2][:2]
-    assert projects[0][2] not in {projects[1][2], projects[2][2]}
-    assert projects[1][2] != projects[2][2]
+    assert {(name, rate) for name, rate, _ in projects} == {
+        ("Example Job A", 25.0),
+        ("Example Job B", 30.0),
+    }
+    colors = [color for _, _, color in projects]
+    assert len(set(colors)) == 2
 
 
 def test_import_task_colors_avoid_existing_projects_case_insensitively(
@@ -299,7 +301,7 @@ def test_import_reuses_existing_task_color(tmp_path: Path) -> None:
         connection.execute(
             "INSERT INTO Projects "
             "(Name, Color, HourlyRate, Currency, Details, SortIndex, Hidden, "
-            "IsLumpSum) VALUES ('Example Job (25/h)', ?, 25, '$', '', 1, 0, 0)",
+            "IsLumpSum) VALUES ('Example Job A', ?, 25, '$', '', 1, 0, 0)",
             (existing_color,),
         )
 
@@ -310,7 +312,7 @@ def test_import_reuses_existing_task_color(tmp_path: Path) -> None:
             "SELECT Name, Color FROM Projects ORDER BY ProjectId"
         ).fetchall()
     assert summary.projects_created == 2
-    assert projects[1] == ("Example Job (25/h)", existing_color)
+    assert projects[1] == ("Example Job A", existing_color)
     colors = [color.upper() for _, color in projects]
     assert len(set(colors)) == len(colors)
 
