@@ -325,6 +325,48 @@ def test_import_rejects_a_legacy_rate_specific_project(tmp_path: Path) -> None:
     assert not (tmp_path / "WorkingHours-imported.db").exists()
 
 
+def test_import_distinguishes_modern_jobs_containing_legacy_rate_text(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "WorkingHours.db"
+    _create_database(database)
+    first_source = tmp_path / "rate-text-job.csv"
+    _write_import_csv(
+        first_source,
+        [
+            [
+                "Example Job (25/h)",
+                "01/15/24 8:00 AM",
+                "01/15/24 9:00 AM",
+                "1",
+                "25",
+                "",
+            ]
+        ],
+    )
+    first_import = import_hourstracker_csv(first_source, database)
+    original_database = first_import.database_path.read_bytes()
+    second_source = tmp_path / "plain-job.csv"
+    _write_import_csv(
+        second_source,
+        [["Example Job", "01/16/24 8:00 AM", "01/16/24 9:00 AM", "1", "25", ""]],
+    )
+
+    second_import = import_hourstracker_csv(second_source, first_import.database_path)
+
+    assert second_import.projects_created == 1
+    assert first_import.database_path.read_bytes() == original_database
+    with sqlite3.connect(second_import.database_path) as connection:
+        assert connection.execute(
+            "SELECT Name, HourlyRate FROM Projects WHERE ProjectId != 1 ORDER BY Name"
+        ).fetchall() == [
+            ("Example Job (25/h) A", 25.0),
+            ("Example Job B", 25.0),
+        ]
+        assert connection.execute("SELECT COUNT(*) FROM WorkUnits").fetchone() == (2,)
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+
 def test_import_is_atomic_and_refuses_duplicate_work_units(tmp_path: Path) -> None:
     database = tmp_path / "WorkingHours.db"
     _create_database(database)
@@ -446,7 +488,16 @@ def test_import_rejects_values_beyond_sqlite_real_precision(
     source = tmp_path / "precision.csv"
     _write_import_csv(
         source,
-        [["Example Job", "01/15/24 8:00 AM", "01/15/24 9:00 AM", "1", rate, adjustment]],
+        [
+            [
+                "Example Job",
+                "01/15/24 8:00 AM",
+                "01/15/24 9:00 AM",
+                "1",
+                rate,
+                adjustment,
+            ]
+        ],
     )
     database = tmp_path / "WorkingHours.db"
     _create_database(database)

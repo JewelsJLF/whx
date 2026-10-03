@@ -452,10 +452,10 @@ def _project_names_by_job_and_rate(
             legacy_name = str(name)
             if not legacy_name.startswith(legacy_prefix):
                 continue
-            legacy_rate, separator, _ = legacy_name[len(legacy_prefix) :].partition(
-                "/h)"
-            )
-            if not separator:
+            legacy_rate, separator, remainder = legacy_name[
+                len(legacy_prefix) :
+            ].partition("/h)")
+            if not separator or remainder:
                 continue
             try:
                 matches_rate = Decimal(legacy_rate) == rate
