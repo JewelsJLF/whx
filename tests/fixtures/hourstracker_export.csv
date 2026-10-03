@@ -1,0 +1,5 @@
+"Job","Clocked In","Clocked Out","Duration","Hourly Rate","Earnings","Comment","Tags","Breaks","Adjustments","TotalTimeAdjustment","TotalEarningsAdjustment","TotalMileage"
+"Example Job","01/15/24 8:00 AM","01/15/24 4:00 PM","8","25.00","200.00","","Work;FY24","","","","",""
+"Example Job","01/16/24 8:00 AM","01/16/24 4:30 PM","8","25.00","205.00","Synthetic note","Work;Client-A","0.5h (12:00 PM to 12:30 PM)","","-0.5","5","3"
+"Example Job","01/17/24 8:00 AM","01/17/24 5:00 PM","8.25","25.00","206.25","","Work;FY24","0.5h (12:00 PM to 12:30 PM);0.25h (3:00 PM to 3:15 PM)","","-0.75","0","0"
+"Example Job","01/18/24 8:00 AM","01/18/24 4:00 PM","8.5","25.00","214.50","","Work;FY24","","0.5h (manual adjustment)","0.5","2","1"

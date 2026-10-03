@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=77", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "whx"
+dynamic = ["version"]
+description = "HoursTracker CSV migration to WorkingHours backups"
+readme = "README.md"
+requires-python = ">=3.14"
+license = "Apache-2.0"
+dependencies = [
+    "click>=8.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "bandit[toml]>=1.8",
+    "mypy>=1.18",
+    "pre-commit>=4.0",
+    "pytest>=8.0",
+    "ruff>=0.11",
+]
+
+[project.scripts]
+whx = "whx.cli:cli"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools_scm]
+version_scheme = "guess-next-dev"
+local_scheme = "no-local-version"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+disallow_untyped_decorators = false
+
+[[tool.mypy.overrides]]
+module = ["click.*"]
+follow_imports = "skip"
+
+[tool.bandit]
+exclude_dirs = ["tests"]
